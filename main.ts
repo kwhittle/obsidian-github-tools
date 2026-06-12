@@ -7,6 +7,7 @@ import {
   PluginSettingTab,
   Setting,
   WorkspaceLeaf,
+  requestUrl,
   setIcon,
 } from "obsidian";
 import { exec } from "child_process";
@@ -68,8 +69,55 @@ interface GitStatus {
   changedFiles: ChangedFile[];
   commitsBehind: number;
   comparingTo: string;
-  incomingFiles: string[]; // files that would change on pull
+  incomingFiles: string[];
 }
+
+// ── GitHub API types ─────────────────────────────────────────────────────────
+
+interface GitHubUser {
+  login: string;
+}
+
+interface GitHubPRItem {
+  number: number;
+  title: string;
+  html_url: string;
+  user: GitHubUser;
+  updated_at: string;
+  draft: boolean;
+  requested_reviewers: GitHubUser[];
+}
+
+interface GitHubNewPR {
+  html_url: string;
+}
+
+interface GitHubApiError {
+  message?: string;
+}
+
+// ── Electron types ───────────────────────────────────────────────────────────
+
+interface ElectronOpenDialogResult {
+  canceled: boolean;
+  filePaths: string[];
+}
+
+interface ElectronDialog {
+  showOpenDialog(options: { properties: string[] }): Promise<ElectronOpenDialogResult>;
+}
+
+interface ElectronModule {
+  remote?: { dialog: ElectronDialog };
+}
+
+// ── Error helper ─────────────────────────────────────────────────────────────
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+// ── Git helpers ──────────────────────────────────────────────────────────────
 
 async function gitExec(repoPath: string, args: string): Promise<string> {
   const { stdout } = await execAsync(`git -C "${repoPath}" ${args}`);
@@ -101,7 +149,6 @@ async function detectRepoIdentity(repoPath: string): Promise<{ owner: string; re
 }
 
 async function fetchGitStatus(repoPath: string, trackBranch: string): Promise<GitStatus> {
-  // Fetch is best-effort — don't fail if offline or remote is unreachable
   try { await gitExec(repoPath, "fetch origin"); } catch { /* non-fatal */ }
 
   const branch = await gitExec(repoPath, "branch --show-current");
@@ -113,13 +160,11 @@ async function fetchGitStatus(repoPath: string, trackBranch: string): Promise<Gi
   ]);
 
   const changedFiles = parseChangedFiles(porcelain);
-  // Plain `git branch` prefixes the current branch with "* " — strip it
   const localBranches = branchesRaw
     .split("\n")
     .map((b) => b.replace(/^\*\s*/, "").trim())
     .filter(Boolean);
 
-  // rev-list and diff can fail if the branch doesn't exist on the remote yet
   let commitsBehind = 0;
   let incomingFiles: string[] = [];
   try {
@@ -205,24 +250,24 @@ interface PullRequest {
   requestedReviewers: string[];
 }
 
-async function ghFetch(url: string, token: string): Promise<any> {
-  const res = await fetch(url, {
+async function ghFetch<T>(url: string, token: string): Promise<T> {
+  const res = await requestUrl({
+    url,
     headers: {
       Authorization: `token ${token}`,
       Accept: "application/vnd.github.v3+json",
     },
   });
-  if (!res.ok) throw new Error(`GitHub API error: ${res.status} ${res.statusText}`);
-  return res.json();
+  return res.json as T;
 }
 
 async function detectGitHubUsername(token: string): Promise<string> {
-  const data = await ghFetch("https://api.github.com/user", token);
+  const data = await ghFetch<GitHubUser>("https://api.github.com/user", token);
   return data.login;
 }
 
 async function fetchOpenPRs(owner: string, repo: string, token: string): Promise<PullRequest[]> {
-  const data: any[] = await ghFetch(
+  const data = await ghFetch<GitHubPRItem[]>(
     `https://api.github.com/repos/${owner}/${repo}/pulls?state=open&per_page=50`,
     token
   );
@@ -233,7 +278,7 @@ async function fetchOpenPRs(owner: string, repo: string, token: string): Promise
     author: pr.user.login,
     updatedAt: pr.updated_at,
     draft: pr.draft ?? false,
-    requestedReviewers: (pr.requested_reviewers ?? []).map((r: any) => r.login),
+    requestedReviewers: (pr.requested_reviewers ?? []).map((r) => r.login),
   }));
 }
 
@@ -241,7 +286,8 @@ async function createGitHubPR(
   owner: string, repo: string, token: string,
   head: string, base: string, title: string, body: string
 ): Promise<string> {
-  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
+  const res = await requestUrl({
+    url: `https://api.github.com/repos/${owner}/${repo}/pulls`,
     method: "POST",
     headers: {
       Authorization: `token ${token}`,
@@ -249,12 +295,13 @@ async function createGitHubPR(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ title, body, head, base }),
+    throw: false,
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as any).message ?? `GitHub API error: ${res.status}`);
+  if (res.status < 200 || res.status >= 300) {
+    const err = res.json as GitHubApiError;
+    throw new Error(err.message ?? `GitHub API error: ${res.status}`);
   }
-  const data: any = await res.json();
+  const data = res.json as GitHubNewPR;
   return data.html_url;
 }
 
@@ -262,8 +309,11 @@ async function createGitHubPR(
 
 async function showFolderPicker(): Promise<string | null> {
   try {
-    const electron = (window as any).require("electron");
-    const dialog = electron.remote?.dialog ?? (await import("@electron/remote" as any)).dialog;
+    const requireFn = (window as Window & { require?: (m: string) => ElectronModule }).require;
+    if (!requireFn) return null;
+    const electron = requireFn("electron");
+    const dialog = electron.remote?.dialog;
+    if (!dialog) return null;
     const result = await dialog.showOpenDialog({ properties: ["openDirectory"] });
     if (!result.canceled && result.filePaths.length > 0) return result.filePaths[0];
   } catch (e) {
@@ -314,8 +364,8 @@ class GitHubRepoView extends ItemView {
       } else {
         this.prs = [];
       }
-    } catch (e: any) {
-      this.errorMsg = e.message;
+    } catch (e: unknown) {
+      this.errorMsg = errorMessage(e);
     } finally {
       this.loading = false;
       this.render();
@@ -333,7 +383,7 @@ class GitHubRepoView extends ItemView {
     header.createEl("h4", { text: "GitHub Repo" });
     const refreshBtn = header.createEl("button", { cls: "gwt-btn-icon", text: "↻" });
     refreshBtn.setAttribute("aria-label", "Refresh");
-    refreshBtn.addEventListener("click", () => this.refresh());
+    refreshBtn.addEventListener("click", () => { void this.refresh(); });
 
     if (this.loading) {
       root.createDiv("gwt-muted").setText("Loading…");
@@ -363,13 +413,12 @@ class GitHubRepoView extends ItemView {
     const section = root.createDiv("gwt-section");
     section.createEl("h5", { text: "Local Repo" });
 
-    // Action bar
     const actionBar = section.createDiv("gwt-action-bar");
     const actions: Array<{ icon: string; label: string; handler: () => void }> = [
-      { icon: "rotate-cw",        label: "Fetch",      handler: () => this.handleFetch() },
-      { icon: "download",         label: "Pull",       handler: () => this.handlePull() },
-      { icon: "upload",           label: "Push",       handler: () => this.handlePush() },
-      { icon: "git-pull-request", label: "Create PR",  handler: () => this.handleCreatePR() },
+      { icon: "rotate-cw",        label: "Fetch",      handler: () => { void this.handleFetch(); } },
+      { icon: "download",         label: "Pull",       handler: () => { void this.handlePull(); } },
+      { icon: "upload",           label: "Push",       handler: () => { void this.handlePush(); } },
+      { icon: "git-pull-request", label: "Create PR",  handler: () => { void this.handleCreatePR(); } },
     ];
     for (const a of actions) {
       const btn = actionBar.createEl("button", { cls: "gwt-action-btn" });
@@ -379,7 +428,6 @@ class GitHubRepoView extends ItemView {
       btn.addEventListener("click", a.handler);
     }
 
-    // Branch selector
     const branchRow = section.createDiv("gwt-branch-row");
     branchRow.createSpan({ cls: "gwt-label", text: "Branch" });
     const select = branchRow.createEl("select", { cls: "gwt-branch-select" });
@@ -387,9 +435,8 @@ class GitHubRepoView extends ItemView {
       const opt = select.createEl("option", { text: b, value: b });
       if (b === branch) opt.selected = true;
     });
-    select.addEventListener("change", () => this.handleBranchSwitch(select.value, select, branch));
+    select.addEventListener("change", () => { void this.handleBranchSwitch(select.value, select, branch); });
 
-    // New branch buttons
     const newBranchRow = section.createDiv("gwt-new-branch-row");
     const newBtn = newBranchRow.createEl("button", { cls: "gwt-btn gwt-btn-sm", text: "+ New branch" });
     newBtn.addEventListener("click", () => {
@@ -405,14 +452,13 @@ class GitHubRepoView extends ItemView {
       }).open();
     });
 
-    // Uncommitted changes + expandable file list
     if (hasUncommittedChanges) {
       const details = section.createEl("details", { cls: "gwt-files-details" });
       const summary = details.createEl("summary", { cls: "gwt-files-summary gwt-warning" });
       summary.createSpan({ text: `⚠ ${changedFiles.length} uncommitted change${changedFiles.length !== 1 ? "s" : ""}` });
       const commitBtn = summary.createEl("button", { cls: "gwt-btn gwt-btn-sm gwt-commit-inline-btn", text: "Commit…" });
       commitBtn.addEventListener("click", (e) => {
-        e.stopPropagation(); // don't toggle the <details>
+        e.stopPropagation();
         this.handleCommit(changedFiles);
       });
 
@@ -424,7 +470,6 @@ class GitHubRepoView extends ItemView {
       });
     }
 
-    // Staleness + pull
     if (commitsBehind > 0) {
       const behindRow = section.createDiv("gwt-behind-row");
       behindRow.createSpan({
@@ -432,7 +477,7 @@ class GitHubRepoView extends ItemView {
         text: `⬇ ${commitsBehind} commit${commitsBehind !== 1 ? "s" : ""} behind origin/${comparingTo}`,
       });
       const pullBtn = behindRow.createEl("button", { cls: "gwt-btn gwt-btn-pull", text: "Pull" });
-      pullBtn.addEventListener("click", () => this.handlePull());
+      pullBtn.addEventListener("click", () => { void this.handlePull(); });
     } else {
       section.createDiv("gwt-row gwt-ok").setText(`✓ Up to date with origin/${comparingTo}`);
     }
@@ -449,9 +494,8 @@ class GitHubRepoView extends ItemView {
       await runGitCheckout(this.plugin.settings.repoPath, newBranch);
       new Notice(`Switched to branch: ${newBranch}`);
       await this.refresh();
-    } catch (e: any) {
-      new Notice(`Could not switch branch: ${e.message}`, 8000);
-      // Revert the dropdown to the original branch
+    } catch (e: unknown) {
+      new Notice(`Could not switch branch: ${errorMessage(e)}`, 8000);
       Array.from(select.options).forEach((opt) => {
         opt.selected = opt.value === prevBranch;
       });
@@ -463,8 +507,8 @@ class GitHubRepoView extends ItemView {
       await runGitCreateBranch(this.plugin.settings.repoPath, name, from);
       new Notice(`Created and switched to branch: ${name}`);
       await this.refresh();
-    } catch (e: any) {
-      new Notice(`Failed to create branch: ${e.message}`, 8000);
+    } catch (e: unknown) {
+      new Notice(`Failed to create branch: ${errorMessage(e)}`, 8000);
     }
   }
 
@@ -473,8 +517,8 @@ class GitHubRepoView extends ItemView {
       await gitExec(this.plugin.settings.repoPath, "fetch origin");
       new Notice("Fetched.");
       await this.refresh();
-    } catch (e: any) {
-      new Notice(`Fetch failed: ${e.message}`, 6000);
+    } catch (e: unknown) {
+      new Notice(`Fetch failed: ${errorMessage(e)}`, 6000);
     }
   }
 
@@ -487,8 +531,8 @@ class GitHubRepoView extends ItemView {
       await runGitPush(repoPath, branch, !pushed);
       new Notice("Pushed.");
       await this.refresh();
-    } catch (e: any) {
-      new Notice(`Push failed: ${e.message}`, 8000);
+    } catch (e: unknown) {
+      new Notice(`Push failed: ${errorMessage(e)}`, 8000);
     }
   }
 
@@ -507,8 +551,8 @@ class GitHubRepoView extends ItemView {
           new Notice("Committed.");
         }
         await this.refresh();
-      } catch (e: any) {
-        new Notice(`Commit failed: ${e.message}`, 8000);
+      } catch (e: unknown) {
+        new Notice(`Commit failed: ${errorMessage(e)}`, 8000);
       }
     }).open();
   }
@@ -523,7 +567,6 @@ class GitHubRepoView extends ItemView {
       return;
     }
 
-    // Step 1: uncommitted changes → commit first, then continue
     if (this.gitStatus?.hasUncommittedChanges) {
       new CommitModal(this.app, this.gitStatus.changedFiles, async (files, message, push) => {
         try {
@@ -535,8 +578,8 @@ class GitHubRepoView extends ItemView {
           }
           await this.refresh();
           await this.proceedWithPR(branch, localBranches);
-        } catch (e: any) {
-          new Notice(`Commit failed: ${e.message}`, 8000);
+        } catch (e: unknown) {
+          new Notice(`Commit failed: ${errorMessage(e)}`, 8000);
         }
       }).open();
       return;
@@ -548,28 +591,26 @@ class GitHubRepoView extends ItemView {
   private async proceedWithPR(branch: string, localBranches: string[]): Promise<void> {
     const { repoPath, repoOwner, repoName, githubToken } = this.plugin.settings;
 
-    // Step 2: push branch if not on remote
     const pushed = await isBranchPushed(repoPath, branch);
     if (!pushed) {
       try {
         new Notice("Branch not yet on remote. Pushing…");
         await runGitPush(repoPath, branch, true);
         new Notice("Pushed.");
-      } catch (e: any) {
-        new Notice(`Push failed: ${e.message}`, 8000);
+      } catch (e: unknown) {
+        new Notice(`Push failed: ${errorMessage(e)}`, 8000);
         return;
       }
     }
 
-    // Step 3: open PR creation modal
     new CreatePRModal(this.app, branch, localBranches, async (title, body, base) => {
       try {
         const url = await createGitHubPR(repoOwner, repoName, githubToken, branch, base, title, body);
         window.open(url, "_blank");
         new Notice("PR created.");
         await this.refresh();
-      } catch (e: any) {
-        new Notice(`Failed to create PR: ${e.message}`, 8000);
+      } catch (e: unknown) {
+        new Notice(`Failed to create PR: ${errorMessage(e)}`, 8000);
       }
     }).open();
   }
@@ -666,15 +707,14 @@ class GitHubRepoView extends ItemView {
         );
         return;
       }
-      // Local changes don't touch any incoming files — safe to pull
     }
 
     try {
       await runGitPull(this.plugin.settings.repoPath);
       new Notice("Pull successful.");
       await this.refresh();
-    } catch (e: any) {
-      new Notice(`Pull failed: ${e.message}`, 8000);
+    } catch (e: unknown) {
+      new Notice(`Pull failed: ${errorMessage(e)}`, 8000);
     }
   }
 }
@@ -692,7 +732,7 @@ export default class GitHubWikiPlugin extends Plugin {
 
     this.registerView(VIEW_TYPE, (leaf) => new GitHubRepoView(leaf, this));
 
-    this.ribbonIcon = this.addRibbonIcon("github", "GitHub Repo", () => this.activateView());
+    this.ribbonIcon = this.addRibbonIcon("github", "GitHub Repo", () => { void this.activateView(); });
 
     this.addSettingTab(new GitHubRepoSettingTab(this.app, this));
 
@@ -700,13 +740,15 @@ export default class GitHubWikiPlugin extends Plugin {
       this.statusBarItem = this.addStatusBarItem();
       this.statusBarItem.addClass("gwt-status-bar");
       this.statusBarItem.setText("GH ···");
-      this.statusBarItem.addEventListener("click", () => this.activateView());
+      this.statusBarItem.addEventListener("click", () => { void this.activateView(); });
     }
 
-    this.app.workspace.onLayoutReady(async () => {
-      await this.detectAndCacheIdentity();
-      if (this.settings.autoOpenSidebar) this.activateView();
-      this.startPolling();
+    this.app.workspace.onLayoutReady(() => {
+      void (async () => {
+        await this.detectAndCacheIdentity();
+        if (this.settings.autoOpenSidebar) await this.activateView();
+        this.startPolling();
+      })();
     });
   }
 
@@ -751,10 +793,10 @@ export default class GitHubWikiPlugin extends Plugin {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(VIEW_TYPE)[0];
     if (!leaf) {
-      leaf = workspace.getRightLeaf(false)!;
+      leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf(false);
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
-    workspace.revealLeaf(leaf);
+    await workspace.revealLeaf(leaf);
   }
 
   updateRibbonIcon(commitsBehind: number): void {
@@ -801,7 +843,7 @@ export default class GitHubWikiPlugin extends Plugin {
 
   private startPolling(): void {
     const intervalMs = (this.settings.pollIntervalMinutes || 15) * 60 * 1000;
-    this.pollTimer = window.setInterval(() => this.refreshView(), intervalMs);
+    this.pollTimer = window.setInterval(() => { void this.refreshView(); }, intervalMs);
   }
 
   private stopPolling(): void {
@@ -826,7 +868,7 @@ export default class GitHubWikiPlugin extends Plugin {
         changed = true;
       }
     }
-    if (changed) this.saveSettings();
+    if (changed) void this.saveSettings();
   }
 
   hasNewActivity(pr: PullRequest): boolean {
@@ -838,7 +880,7 @@ export default class GitHubWikiPlugin extends Plugin {
 
   markSeen(pr: PullRequest): void {
     this.settings.seenPRActivity[pr.number] = pr.updatedAt;
-    this.saveSettings();
+    void this.saveSettings();
   }
 }
 
@@ -865,7 +907,6 @@ class CommitModal extends Modal {
 
     contentEl.createEl("h3", { text: "Commit changes" });
 
-    // File list with checkboxes
     contentEl.createEl("label", { cls: "gwt-modal-label", text: "Stage files" });
     const selectRow = contentEl.createDiv("gwt-modal-select-all");
     const selectAll = selectRow.createEl("a", { text: "Select all" });
@@ -876,7 +917,7 @@ class CommitModal extends Modal {
 
     this.changedFiles.forEach((f) => {
       const item = fileList.createDiv("gwt-modal-file-item");
-      const cb = item.createEl("input", { type: "checkbox" }) as HTMLInputElement;
+      const cb = item.createEl("input", { type: "checkbox" });
       cb.checked = true;
       checkboxes.push(cb);
       item.createSpan({ cls: `gwt-file-status gwt-status-${f.status.replace("?", "untracked")}`, text: f.status });
@@ -887,13 +928,11 @@ class CommitModal extends Modal {
     selectAll.addEventListener("click", () => checkboxes.forEach((cb) => (cb.checked = true)));
     deselectAll.addEventListener("click", () => checkboxes.forEach((cb) => (cb.checked = false)));
 
-    // Commit message
     contentEl.createEl("label", { cls: "gwt-modal-label", text: "Commit message" });
-    const textarea = contentEl.createEl("textarea", { cls: "gwt-modal-textarea" }) as HTMLTextAreaElement;
+    const textarea = contentEl.createEl("textarea", { cls: "gwt-modal-textarea" });
     textarea.rows = 3;
     textarea.placeholder = "feat: describe your changes";
 
-    // Buttons
     const btnRow = contentEl.createDiv("gwt-modal-btns");
     const commitBtn = btnRow.createEl("button", { cls: "mod-cta", text: "Commit" });
     const commitPushBtn = btnRow.createEl("button", { text: "Commit & Push" });
@@ -912,11 +951,11 @@ class CommitModal extends Modal {
       await this.onSubmit(selected, message, push);
     };
 
-    commitBtn.addEventListener("click", () => submit(false));
-    commitPushBtn.addEventListener("click", () => submit(true));
+    commitBtn.addEventListener("click", () => { void submit(false); });
+    commitPushBtn.addEventListener("click", () => { void submit(true); });
     cancelBtn.addEventListener("click", () => this.close());
 
-    setTimeout(() => textarea.focus(), 50);
+    window.setTimeout(() => textarea.focus(), 50);
   }
 
   onClose(): void { this.contentEl.empty(); }
@@ -948,7 +987,6 @@ class CreatePRModal extends Modal {
 
     contentEl.createEl("h3", { text: "Create pull request" });
 
-    // Base branch
     const baseRow = contentEl.createDiv("gwt-modal-row");
     baseRow.createEl("label", { cls: "gwt-modal-label", text: "Base branch" });
     const baseSelect = baseRow.createEl("select", { cls: "gwt-modal-select" });
@@ -962,7 +1000,6 @@ class CreatePRModal extends Modal {
         if (b === defaultBase) opt.selected = true;
       });
 
-    // From hint
     const hint = contentEl.createEl("p", { cls: "gwt-modal-from-hint" });
     const updateHint = () => {
       hint.setText(`${this.currentBranch}  →  ${baseSelect.value}`);
@@ -970,20 +1007,17 @@ class CreatePRModal extends Modal {
     updateHint();
     baseSelect.addEventListener("change", updateHint);
 
-    // PR title
     const titleRow = contentEl.createDiv("gwt-modal-row");
     titleRow.createEl("label", { cls: "gwt-modal-label", text: "Title" });
-    const titleInput = titleRow.createEl("input", { cls: "gwt-modal-input", type: "text" }) as HTMLInputElement;
+    const titleInput = titleRow.createEl("input", { cls: "gwt-modal-input", type: "text" });
     titleInput.value = branchToPRTitle(this.currentBranch);
 
-    // Description
     const bodyRow = contentEl.createDiv("gwt-modal-row");
     bodyRow.createEl("label", { cls: "gwt-modal-label", text: "Description (optional)" });
-    const bodyTextarea = bodyRow.createEl("textarea", { cls: "gwt-modal-textarea" }) as HTMLTextAreaElement;
+    const bodyTextarea = bodyRow.createEl("textarea", { cls: "gwt-modal-textarea" });
     bodyTextarea.rows = 4;
     bodyTextarea.placeholder = "Describe your changes…";
 
-    // Buttons
     const btnRow = contentEl.createDiv("gwt-modal-btns");
     const createBtn = btnRow.createEl("button", { cls: "mod-cta", text: "Create PR" });
     const cancelBtn = btnRow.createEl("button", { text: "Cancel" });
@@ -997,11 +1031,11 @@ class CreatePRModal extends Modal {
       await this.onSubmit(title, bodyTextarea.value.trim(), baseSelect.value);
     };
 
-    createBtn.addEventListener("click", submit);
+    createBtn.addEventListener("click", () => { void submit(); });
     cancelBtn.addEventListener("click", () => this.close());
-    titleInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+    titleInput.addEventListener("keydown", (e) => { if (e.key === "Enter") void submit(); });
 
-    setTimeout(() => titleInput.focus(), 50);
+    window.setTimeout(() => titleInput.focus(), 50);
   }
 
   onClose(): void { this.contentEl.empty(); }
@@ -1011,7 +1045,7 @@ class CreatePRModal extends Modal {
 
 class NewBranchModal extends Modal {
   private currentBranch: string;
-  private sourceBranch: string | null; // null = from current HEAD
+  private sourceBranch: string | null;
   private availableBranches: string[];
   private onSubmit: (name: string, from: string | null) => Promise<void>;
 
@@ -1040,7 +1074,6 @@ class NewBranchModal extends Modal {
       text: fromPicker ? "Create new branch from…" : "Create new branch",
     });
 
-    // Source branch picker (only shown for "from..." flow)
     if (fromPicker) {
       const row = contentEl.createDiv("gwt-modal-row");
       row.createEl("label", { cls: "gwt-modal-label", text: "Source branch" });
@@ -1057,13 +1090,11 @@ class NewBranchModal extends Modal {
       });
     }
 
-    // Branch name input
     const nameRow = contentEl.createDiv("gwt-modal-row");
     nameRow.createEl("label", { cls: "gwt-modal-label", text: "Branch name" });
     const input = nameRow.createEl("input", { cls: "gwt-modal-input", type: "text" });
     input.placeholder = "feature/my-branch";
 
-    // Buttons
     const btnRow = contentEl.createDiv("gwt-modal-btns");
     const createBtn = btnRow.createEl("button", { cls: "mod-cta", text: "Create branch" });
     const cancelBtn = btnRow.createEl("button", { text: "Cancel" });
@@ -1077,15 +1108,14 @@ class NewBranchModal extends Modal {
       await this.onSubmit(name, this.sourceBranch);
     };
 
-    createBtn.addEventListener("click", submit);
+    createBtn.addEventListener("click", () => { void submit(); });
     cancelBtn.addEventListener("click", () => this.close());
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") submit();
+      if (e.key === "Enter") void submit();
       if (e.key === "Escape") this.close();
     });
 
-    // Focus the name input after a tick so the modal is fully rendered
-    setTimeout(() => input.focus(), 50);
+    window.setTimeout(() => input.focus(), 50);
   }
 
   onClose(): void {
@@ -1097,6 +1127,8 @@ class NewBranchModal extends Modal {
 
 class GitHubRepoSettingTab extends PluginSettingTab {
   plugin: GitHubWikiPlugin;
+  private detectedRepoEl: HTMLElement | null = null;
+  private detectedUserEl: HTMLElement | null = null;
 
   constructor(app: App, plugin: GitHubWikiPlugin) {
     super(app, plugin);
@@ -1106,9 +1138,9 @@ class GitHubRepoSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "GitHub Repo Tools" });
 
-    containerEl.createEl("h3", { text: "Connection" });
+    new Setting(containerEl).setName("GitHub Repo Tools").setHeading();
+    new Setting(containerEl).setName("Connection").setHeading();
 
     new Setting(containerEl)
       .setName("Local repo path")
@@ -1123,7 +1155,7 @@ class GitHubRepoSettingTab extends PluginSettingTab {
             this.plugin.settings.repoName = "";
             await this.plugin.saveSettings();
             await this.plugin.detectAndCacheIdentity();
-            this.display();
+            this.updateDetectedInfo();
           })
       )
       .addButton((btn) =>
@@ -1135,7 +1167,7 @@ class GitHubRepoSettingTab extends PluginSettingTab {
           this.plugin.settings.repoName = "";
           await this.plugin.saveSettings();
           await this.plugin.detectAndCacheIdentity();
-          this.display();
+          this.updateDetectedInfo();
         })
       );
 
@@ -1151,20 +1183,22 @@ class GitHubRepoSettingTab extends PluginSettingTab {
             this.plugin.settings.githubUsername = "";
             await this.plugin.saveSettings();
             await this.plugin.detectAndCacheIdentity();
-            this.display();
+            this.updateDetectedInfo();
           });
         t.inputEl.type = "password";
       });
 
     const s = this.plugin.settings;
-    if (s.repoOwner && s.repoName) {
-      containerEl.createEl("p", { cls: "setting-item-description", text: `Detected repo: ${s.repoOwner}/${s.repoName}` });
-    }
-    if (s.githubUsername) {
-      containerEl.createEl("p", { cls: "setting-item-description", text: `Detected GitHub user: @${s.githubUsername}` });
-    }
+    this.detectedRepoEl = containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: s.repoOwner && s.repoName ? `Detected repo: ${s.repoOwner}/${s.repoName}` : "",
+    });
+    this.detectedUserEl = containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: s.githubUsername ? `Detected GitHub user: @${s.githubUsername}` : "",
+    });
 
-    containerEl.createEl("h3", { text: "Features" });
+    new Setting(containerEl).setName("Features").setHeading();
 
     new Setting(containerEl)
       .setName("Staleness check")
@@ -1186,7 +1220,7 @@ class GitHubRepoSettingTab extends PluginSettingTab {
       .setDesc("Show a section for PRs where you are a requested reviewer")
       .addToggle((t) => t.setValue(s.enableReviewRequests).onChange(async (v) => { this.plugin.settings.enableReviewRequests = v; await this.plugin.saveSettings(); }));
 
-    containerEl.createEl("h3", { text: "Display" });
+    new Setting(containerEl).setName("Display").setHeading();
 
     new Setting(containerEl)
       .setName("Status bar item")
@@ -1203,7 +1237,7 @@ class GitHubRepoSettingTab extends PluginSettingTab {
       .setDesc("Include draft pull requests in the PR list")
       .addToggle((t) => t.setValue(s.showDraftPRs).onChange(async (v) => { this.plugin.settings.showDraftPRs = v; await this.plugin.saveSettings(); }));
 
-    containerEl.createEl("h3", { text: "Advanced" });
+    new Setting(containerEl).setName("Advanced").setHeading();
 
     new Setting(containerEl)
       .setName("Poll interval (minutes)")
@@ -1234,5 +1268,19 @@ class GitHubRepoSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+  }
+
+  private updateDetectedInfo(): void {
+    const s = this.plugin.settings;
+    if (this.detectedRepoEl) {
+      this.detectedRepoEl.setText(
+        s.repoOwner && s.repoName ? `Detected repo: ${s.repoOwner}/${s.repoName}` : ""
+      );
+    }
+    if (this.detectedUserEl) {
+      this.detectedUserEl.setText(
+        s.githubUsername ? `Detected GitHub user: @${s.githubUsername}` : ""
+      );
+    }
   }
 }
