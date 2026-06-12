@@ -29,6 +29,27 @@
   background: var(--background-modifier-hover);
 }
 
+/* ── Ribbon icon alert badge ─────────────────────────────────────────────── */
+
+.gwt-ribbon-alert {
+  position: relative;
+}
+
+.gwt-ribbon-alert::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  background: var(--color-orange);
+  border-radius: 50%;
+  border: 2px solid var(--background-primary);
+  pointer-events: none;
+}
+
+/* ── Section layout ──────────────────────────────────────────────────────── */
+
 .gwt-section {
   margin-bottom: 16px;
 }
@@ -48,21 +69,303 @@
 
 .gwt-label {
   color: var(--text-muted);
+  margin-right: 4px;
+}
+
+/* ── Branch selector ─────────────────────────────────────────────────────── */
+
+.gwt-branch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.gwt-branch-select {
+  flex: 1;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+}
+
+.gwt-branch-select:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+/* ── Action bar ──────────────────────────────────────────────────────────── */
+
+.gwt-action-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.gwt-action-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 2px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.gwt-action-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.gwt-action-btn .svg-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.gwt-action-label {
+  font-size: 10px;
+  line-height: 1;
+}
+
+/* ── Commit inline button ────────────────────────────────────────────────── */
+
+.gwt-commit-inline-btn {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 7px;
+  vertical-align: middle;
+}
+
+/* ── Modal: file list ────────────────────────────────────────────────────── */
+
+.gwt-modal-file-list {
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 4px 0 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 4px;
+}
+
+.gwt-modal-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--font-monospace);
+}
+
+.gwt-modal-file-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.gwt-modal-select-all {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.gwt-modal-select-all a {
+  cursor: pointer;
+  color: var(--interactive-accent);
+  text-decoration: none;
+}
+
+.gwt-modal-select-all a:hover {
+  text-decoration: underline;
+}
+
+.gwt-modal-textarea {
+  width: 100%;
+  font-size: 13px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  resize: vertical;
+  font-family: inherit;
+  box-sizing: border-box;
+  margin-top: 4px;
+}
+
+.gwt-modal-textarea:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+.gwt-modal-from-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0 0 10px;
+  font-family: var(--font-monospace);
+}
+
+/* ── New branch buttons ──────────────────────────────────────────────────── */
+
+.gwt-new-branch-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.gwt-btn-sm {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 1;
+}
+
+/* ── New branch modal ────────────────────────────────────────────────────── */
+
+.gwt-modal h3 {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+.gwt-modal-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.gwt-modal-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.gwt-modal-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.gwt-modal-select,
+.gwt-modal-input {
+  width: 100%;
+  font-size: 13px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+}
+
+.gwt-modal-select:focus,
+.gwt-modal-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+.gwt-modal-btns {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+/* ── Uncommitted files ───────────────────────────────────────────────────── */
+
+.gwt-files-details {
+  margin-bottom: 8px;
+}
+
+.gwt-files-summary {
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+  padding: 2px 0;
+  list-style: none;
+}
+
+.gwt-files-summary::-webkit-details-marker {
+  display: none;
+}
+
+.gwt-files-summary::before {
+  content: "▶ ";
+  font-size: 10px;
+  transition: transform 0.1s;
+}
+
+details[open] .gwt-files-summary::before {
+  content: "▼ ";
+}
+
+.gwt-files-list {
+  margin-top: 6px;
+  padding-left: 8px;
+}
+
+.gwt-file-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  font-family: var(--font-monospace);
+  padding: 1px 0;
+}
+
+.gwt-file-status {
+  font-weight: 700;
+  min-width: 16px;
+  text-align: center;
+  font-size: 10px;
+}
+
+.gwt-status-M  { color: var(--color-yellow); }
+.gwt-status-A  { color: var(--color-green); }
+.gwt-status-D  { color: var(--color-red); }
+.gwt-status-R  { color: var(--color-blue); }
+.gwt-status-untracked { color: var(--text-muted); }
+.gwt-status-UU { color: var(--color-orange); }
+
+.gwt-file-path {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Behind / pull ───────────────────────────────────────────────────────── */
+
+.gwt-behind-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.gwt-behind-label {
+  color: var(--color-yellow);
+  font-size: 12px;
+  flex: 1;
 }
 
 .gwt-warning {
   color: var(--color-orange);
 }
 
-.gwt-behind {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--color-yellow);
-}
-
 .gwt-ok {
   color: var(--color-green);
+  font-size: 12px;
 }
 
 .gwt-btn {
@@ -70,7 +373,48 @@
   padding: 2px 8px;
   cursor: pointer;
   border-radius: 3px;
+  white-space: nowrap;
 }
+
+.gwt-btn-pull {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+}
+
+.gwt-btn-pull:hover {
+  filter: brightness(1.1);
+}
+
+/* ── Collapsible PR section ──────────────────────────────────────────────── */
+
+.gwt-pr-collapsible-summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.gwt-pr-collapsible-summary::-webkit-details-marker {
+  display: none;
+}
+
+.gwt-pr-collapsible-summary h5 {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gwt-pr-collapsible-summary h5::before {
+  content: "▶";
+  font-size: 9px;
+  color: var(--text-faint);
+}
+
+details[open] .gwt-pr-collapsible-summary h5::before {
+  content: "▼";
+}
+
+/* ── PR list ─────────────────────────────────────────────────────────────── */
 
 .gwt-pr {
   margin-bottom: 6px;
@@ -90,6 +434,7 @@
   color: var(--text-normal);
   margin-bottom: 2px;
   line-height: 1.4;
+  font-size: 13px;
 }
 
 .gwt-pr-link:hover {
@@ -110,6 +455,8 @@
   font-style: italic;
 }
 
+/* ── Misc ────────────────────────────────────────────────────────────────── */
+
 .gwt-empty {
   font-size: 12px;
   color: var(--text-faint);
@@ -118,6 +465,7 @@
 
 .gwt-muted {
   color: var(--text-muted);
+  font-size: 12px;
 }
 
 .gwt-error {
@@ -125,4 +473,12 @@
   font-size: 12px;
   margin-bottom: 8px;
   word-break: break-word;
+}
+
+.gwt-status-bar {
+  cursor: pointer;
+}
+
+.gwt-status-bar:hover {
+  color: var(--text-normal);
 }

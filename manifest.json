@@ -1,10 +1,10 @@
 {
-  "id": "obsidian-github-tools",
-  "name": "GitHub Wiki Tools",
+  "id": "github-repo-tools",
+  "name": "GitHub Repo Tools",
   "version": "1.0.0",
   "minAppVersion": "0.15.0",
-  "description": "Monitor your GitHub wiki repo — staleness alerts, PR dashboard, and activity notifications.",
+  "description": "Monitor a GitHub repo — staleness alerts, PR dashboard, and activity notifications.",
   "author": "Kyle Whittle",
-  "authorUrl": "",
+  "authorUrl": "https://github.com/kry-kylewhittle",
   "isDesktopOnly": true
 }
