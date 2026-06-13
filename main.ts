@@ -757,7 +757,7 @@ export default class GitHubWikiPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<Settings>);
     if (!this.settings.seenPRActivity) this.settings.seenPRActivity = {};
   }
 
@@ -1139,7 +1139,6 @@ class GitHubRepoSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl).setName("GitHub Repo Tools").setHeading();
     new Setting(containerEl).setName("Connection").setHeading();
 
     new Setting(containerEl)

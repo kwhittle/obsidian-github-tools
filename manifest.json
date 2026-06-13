@@ -2,7 +2,7 @@
   "id": "github-repo-tools",
   "name": "GitHub Repo Tools",
   "version": "1.0.0",
-  "minAppVersion": "1.1.3",
+  "minAppVersion": "1.7.2",
   "description": "Monitor a GitHub repo — staleness alerts, PR dashboard, and activity notifications.",
   "author": "Kyle Whittle",
   "authorUrl": "https://github.com/kry-kylewhittle",
