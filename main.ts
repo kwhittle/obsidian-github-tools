@@ -121,7 +121,7 @@ function errorMessage(e: unknown): string {
 
 async function gitExec(repoPath: string, args: string): Promise<string> {
   const { stdout } = await execAsync(`git -C "${repoPath}" ${args}`);
-  return stdout.trim();
+  return stdout.trimEnd();
 }
 
 function parseChangedFiles(porcelain: string): ChangedFile[] {
