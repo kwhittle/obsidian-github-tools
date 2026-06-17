@@ -191,6 +191,15 @@ async function runGitPull(repoPath: string): Promise<void> {
   await gitExec(repoPath, "pull");
 }
 
+async function runGitStash(repoPath: string): Promise<boolean> {
+  const out = await gitExec(repoPath, "stash push -u -m 'obsidian-github-tools: auto-stash'");
+  return !out.includes("No local changes to save");
+}
+
+async function runGitStashPop(repoPath: string): Promise<void> {
+  await gitExec(repoPath, "stash pop");
+}
+
 async function runGitCheckout(repoPath: string, branch: string): Promise<void> {
   await gitExec(repoPath, `checkout "${branch}"`);
 }
@@ -326,8 +335,8 @@ async function showFolderPicker(): Promise<string | null> {
 
 class GitHubRepoView extends ItemView {
   plugin: GitHubWikiPlugin;
-  private gitStatus: GitStatus | null = null;
-  private prs: PullRequest[] = [];
+  gitStatus: GitStatus | null = null;
+  prs: PullRequest[] = [];
   private loading = false;
   private errorMsg: string | null = null;
 
@@ -489,17 +498,40 @@ class GitHubRepoView extends ItemView {
     prevBranch: string
   ): Promise<void> {
     if (newBranch === prevBranch) return;
+    const { repoPath } = this.plugin.settings;
+
+    const stashed = this.gitStatus?.hasUncommittedChanges
+      ? await runGitStash(repoPath)
+      : false;
 
     try {
-      await runGitCheckout(this.plugin.settings.repoPath, newBranch);
-      new Notice(`Switched to branch: ${newBranch}`);
-      await this.refresh();
+      await runGitCheckout(repoPath, newBranch);
     } catch (e: unknown) {
+      if (stashed) {
+        try { await runGitStashPop(repoPath); } catch { /* best-effort */ }
+      }
       new Notice(`Could not switch branch: ${errorMessage(e)}`, 8000);
       Array.from(select.options).forEach((opt) => {
         opt.selected = opt.value === prevBranch;
       });
+      return;
     }
+
+    if (stashed) {
+      try {
+        await runGitStashPop(repoPath);
+        new Notice(`Switched to ${newBranch} and re-applied local changes.`);
+      } catch (e: unknown) {
+        new Notice(
+          `Switched to ${newBranch}. Local changes are in the stash — resolve conflicts and run \`git stash pop\` manually.`,
+          12000
+        );
+      }
+    } else {
+      new Notice(`Switched to branch: ${newBranch}`);
+    }
+
+    await this.refresh();
   }
 
   private async handleCreateBranch(name: string, from: string | null): Promise<void> {
@@ -693,29 +725,37 @@ class GitHubRepoView extends ItemView {
 
   private async handlePull(): Promise<void> {
     if (!this.gitStatus) return;
+    const { repoPath } = this.plugin.settings;
 
-    if (this.gitStatus.hasUncommittedChanges) {
-      const localPaths = new Set(this.gitStatus.changedFiles.map((f) => f.path));
-      const conflicts = this.gitStatus.incomingFiles.filter((f) => localPaths.has(f));
-
-      if (conflicts.length > 0) {
-        const fileList = conflicts.slice(0, 5).join("\n");
-        const extra = conflicts.length > 5 ? `\n…and ${conflicts.length - 5} more` : "";
-        new Notice(
-          `Cannot pull: ${conflicts.length} incoming file${conflicts.length !== 1 ? "s" : ""} overlap your local changes:\n\n${fileList}${extra}`,
-          10000
-        );
-        return;
-      }
-    }
+    const stashed = this.gitStatus.hasUncommittedChanges
+      ? await runGitStash(repoPath)
+      : false;
 
     try {
-      await runGitPull(this.plugin.settings.repoPath);
-      new Notice("Pull successful.");
-      await this.refresh();
+      await runGitPull(repoPath);
     } catch (e: unknown) {
+      if (stashed) {
+        try { await runGitStashPop(repoPath); } catch { /* best-effort */ }
+      }
       new Notice(`Pull failed: ${errorMessage(e)}`, 8000);
+      return;
     }
+
+    if (stashed) {
+      try {
+        await runGitStashPop(repoPath);
+        new Notice("Pulled and re-applied local changes.");
+      } catch (e: unknown) {
+        new Notice(
+          `Pulled successfully. Local changes are in the stash — resolve conflicts and run \`git stash pop\` manually.`,
+          12000
+        );
+      }
+    } else {
+      new Notice("Pull successful.");
+    }
+
+    await this.refresh();
   }
 }
 
@@ -724,6 +764,7 @@ class GitHubRepoView extends ItemView {
 export default class GitHubWikiPlugin extends Plugin {
   settings: Settings;
   private pollTimer: number | null = null;
+  private fetchTimer: number | null = null;
   private statusBarItem: HTMLElement | null = null;
   private ribbonIcon: HTMLElement | null = null;
 
@@ -844,6 +885,7 @@ export default class GitHubWikiPlugin extends Plugin {
   private startPolling(): void {
     const intervalMs = (this.settings.pollIntervalMinutes || 15) * 60 * 1000;
     this.pollTimer = window.setInterval(() => { void this.refreshView(); }, intervalMs);
+    this.fetchTimer = window.setInterval(() => { void this.silentFetchView(); }, 30_000);
   }
 
   private stopPolling(): void {
@@ -851,11 +893,29 @@ export default class GitHubWikiPlugin extends Plugin {
       window.clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.fetchTimer !== null) {
+      window.clearInterval(this.fetchTimer);
+      this.fetchTimer = null;
+    }
   }
 
   private async refreshView(): Promise<void> {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
       await (leaf.view as GitHubRepoView).refresh();
+    }
+  }
+
+  private async silentFetchView(): Promise<void> {
+    const s = this.settings;
+    if (!s.enableStalenessCheck || !s.repoPath) return;
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      const view = leaf.view as GitHubRepoView;
+      try {
+        view.gitStatus = await fetchGitStatus(s.repoPath, s.trackBranch);
+        view.render();
+        this.updateStatusBar(view.gitStatus, view.prs);
+        this.updateRibbonIcon(view.gitStatus?.commitsBehind ?? 0);
+      } catch { /* non-fatal background fetch */ }
     }
   }
 
