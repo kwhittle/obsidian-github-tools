@@ -65,6 +65,7 @@ interface ChangedFile {
 interface GitStatus {
   branch: string;
   localBranches: string[];
+  remoteBranches: string[];
   hasUncommittedChanges: boolean;
   changedFiles: ChangedFile[];
   commitsBehind: number;
@@ -149,14 +150,15 @@ async function detectRepoIdentity(repoPath: string): Promise<{ owner: string; re
 }
 
 async function fetchGitStatus(repoPath: string, trackBranch: string): Promise<GitStatus> {
-  try { await gitExec(repoPath, "fetch origin"); } catch { /* non-fatal */ }
+  try { await gitExec(repoPath, "fetch origin --prune"); } catch { /* non-fatal */ }
 
   const branch = await gitExec(repoPath, "branch --show-current");
   const comparingTo = trackBranch || branch;
 
-  const [porcelain, branchesRaw] = await Promise.all([
+  const [porcelain, branchesRaw, remoteBranchesRaw] = await Promise.all([
     gitExec(repoPath, "status --porcelain"),
     gitExec(repoPath, "branch"),
+    gitExec(repoPath, "branch -r"),
   ]);
 
   const changedFiles = parseChangedFiles(porcelain);
@@ -164,6 +166,13 @@ async function fetchGitStatus(repoPath: string, trackBranch: string): Promise<Gi
     .split("\n")
     .map((b) => b.replace(/^\*\s*/, "").trim())
     .filter(Boolean);
+
+  const remoteBranches = remoteBranchesRaw
+    .split("\n")
+    .map((b) => b.trim())
+    .filter((b) => b && !b.includes("HEAD ->"))
+    .map((b) => b.replace(/^origin\//, ""))
+    .filter((b) => !localBranches.includes(b));
 
   let commitsBehind = 0;
   let incomingFiles: string[] = [];
@@ -179,6 +188,7 @@ async function fetchGitStatus(repoPath: string, trackBranch: string): Promise<Gi
   return {
     branch,
     localBranches,
+    remoteBranches,
     hasUncommittedChanges: changedFiles.length > 0,
     changedFiles,
     commitsBehind,
@@ -416,7 +426,7 @@ class GitHubRepoView extends ItemView {
       return;
     }
 
-    const { branch, localBranches, hasUncommittedChanges, changedFiles, commitsBehind, comparingTo } =
+    const { branch, localBranches, remoteBranches, hasUncommittedChanges, changedFiles, commitsBehind, comparingTo } =
       this.gitStatus;
 
     const section = root.createDiv("gwt-section");
@@ -437,14 +447,7 @@ class GitHubRepoView extends ItemView {
       btn.addEventListener("click", a.handler);
     }
 
-    const branchRow = section.createDiv("gwt-branch-row");
-    branchRow.createSpan({ cls: "gwt-label", text: "Branch" });
-    const select = branchRow.createEl("select", { cls: "gwt-branch-select" });
-    localBranches.forEach((b) => {
-      const opt = select.createEl("option", { text: b, value: b });
-      if (b === branch) opt.selected = true;
-    });
-    select.addEventListener("change", () => { void this.handleBranchSwitch(select.value, select, branch); });
+    this.renderBranchPicker(section, branch, localBranches, remoteBranches);
 
     const newBranchRow = section.createDiv("gwt-new-branch-row");
     const newBtn = newBranchRow.createEl("button", { cls: "gwt-btn gwt-btn-sm", text: "+ New branch" });
@@ -492,9 +495,148 @@ class GitHubRepoView extends ItemView {
     }
   }
 
+  private renderBranchPicker(
+    container: HTMLElement,
+    branch: string,
+    localBranches: string[],
+    remoteBranches: string[]
+  ): void {
+    type BranchItem = { name: string; isRemote: boolean };
+
+    const wrapper = container.createDiv("gwt-branch-picker");
+
+    const btn = wrapper.createEl("button", { cls: "gwt-branch-btn" });
+    setIcon(btn.createSpan({ cls: "gwt-branch-btn-icon" }), "git-branch");
+    btn.createSpan({ cls: "gwt-branch-btn-name", text: branch });
+    const chevron = btn.createSpan({ cls: "gwt-branch-btn-chevron" });
+    setIcon(chevron, "chevron-down");
+
+    const dropdown = wrapper.createDiv("gwt-branch-dropdown");
+    dropdown.style.display = "none";
+
+    const filterInput = dropdown.createEl("input", {
+      cls: "gwt-branch-filter",
+      type: "text",
+    });
+    filterInput.setAttribute("placeholder", "Filter branches…");
+    filterInput.setAttribute("spellcheck", "false");
+
+    const listEl = dropdown.createDiv("gwt-branch-list");
+
+    let isOpen = false;
+    let highlightedIndex = -1;
+    let visibleItems: BranchItem[] = [];
+    let outsideClickHandler: ((e: MouseEvent) => void) | null = null;
+
+    const renderList = (filter: string) => {
+      listEl.empty();
+      highlightedIndex = -1;
+      const q = filter.toLowerCase();
+      const matchLocal = localBranches.filter((b) => b.toLowerCase().includes(q));
+      const matchRemote = remoteBranches.filter((b) => b.toLowerCase().includes(q));
+      visibleItems = [
+        ...matchLocal.map((b) => ({ name: b, isRemote: false })),
+        ...matchRemote.map((b) => ({ name: b, isRemote: true })),
+      ];
+
+      if (matchLocal.length > 0) {
+        listEl.createDiv({ cls: "gwt-branch-group-label", text: "LOCAL" });
+        matchLocal.forEach((b) => {
+          const item = listEl.createDiv({
+            cls: "gwt-branch-item" + (b === branch ? " gwt-branch-current" : ""),
+          });
+          setIcon(item.createSpan({ cls: "gwt-branch-item-icon" }), "git-branch");
+          item.createSpan({ cls: "gwt-branch-item-name", text: b });
+          if (b === branch) item.createSpan({ cls: "gwt-branch-item-check", text: "✓" });
+          item.addEventListener("click", () => {
+            closeDropdown();
+            void this.handleBranchSwitch(b, false, branch);
+          });
+        });
+      }
+
+      if (matchRemote.length > 0) {
+        listEl.createDiv({ cls: "gwt-branch-group-label", text: "REMOTE" });
+        matchRemote.forEach((b) => {
+          const item = listEl.createDiv({ cls: "gwt-branch-item gwt-branch-remote-item" });
+          setIcon(item.createSpan({ cls: "gwt-branch-item-icon" }), "cloud");
+          item.createSpan({ cls: "gwt-branch-item-name", text: b });
+          item.createSpan({ cls: "gwt-branch-item-badge", text: "remote" });
+          item.addEventListener("click", () => {
+            closeDropdown();
+            void this.handleBranchSwitch(b, true, branch);
+          });
+        });
+      }
+
+      if (visibleItems.length === 0) {
+        listEl.createDiv({ cls: "gwt-branch-no-results", text: "No matching branches" });
+      }
+    };
+
+    const setHighlight = (idx: number) => {
+      const items = listEl.querySelectorAll<HTMLElement>(".gwt-branch-item");
+      items.forEach((el, i) => el.classList.toggle("gwt-branch-highlighted", i === idx));
+      if (idx >= 0 && idx < items.length) items[idx].scrollIntoView({ block: "nearest" });
+      highlightedIndex = idx;
+    };
+
+    const openDropdown = () => {
+      isOpen = true;
+      dropdown.style.display = "block";
+      btn.addClass("gwt-branch-btn-open");
+      filterInput.value = "";
+      renderList("");
+      window.setTimeout(() => filterInput.focus(), 20);
+      outsideClickHandler = (e: MouseEvent) => {
+        if (!wrapper.contains(e.target as Node)) closeDropdown();
+      };
+      window.setTimeout(() => {
+        document.addEventListener("click", outsideClickHandler!, { capture: true });
+      }, 0);
+    };
+
+    const closeDropdown = () => {
+      isOpen = false;
+      dropdown.style.display = "none";
+      btn.removeClass("gwt-branch-btn-open");
+      if (outsideClickHandler) {
+        document.removeEventListener("click", outsideClickHandler, { capture: true });
+        outsideClickHandler = null;
+      }
+    };
+
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      isOpen ? closeDropdown() : openDropdown();
+    });
+
+    filterInput.addEventListener("input", () => renderList(filterInput.value));
+
+    filterInput.addEventListener("keydown", (e) => {
+      const items = listEl.querySelectorAll<HTMLElement>(".gwt-branch-item");
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setHighlight(Math.min(highlightedIndex + 1, items.length - 1));
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setHighlight(Math.max(highlightedIndex - 1, 0));
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (highlightedIndex >= 0 && highlightedIndex < visibleItems.length) {
+          const item = visibleItems[highlightedIndex];
+          closeDropdown();
+          void this.handleBranchSwitch(item.name, item.isRemote, branch);
+        }
+      } else if (e.key === "Escape") {
+        closeDropdown();
+      }
+    });
+  }
+
   private async handleBranchSwitch(
     newBranch: string,
-    select: HTMLSelectElement,
+    isRemote: boolean,
     prevBranch: string
   ): Promise<void> {
     if (newBranch === prevBranch) return;
@@ -505,15 +647,16 @@ class GitHubRepoView extends ItemView {
       : false;
 
     try {
-      await runGitCheckout(repoPath, newBranch);
+      if (isRemote) {
+        await gitExec(repoPath, `checkout --track "origin/${newBranch}"`);
+      } else {
+        await runGitCheckout(repoPath, newBranch);
+      }
     } catch (e: unknown) {
       if (stashed) {
         try { await runGitStashPop(repoPath); } catch { /* best-effort */ }
       }
       new Notice(`Could not switch branch: ${errorMessage(e)}`, 8000);
-      Array.from(select.options).forEach((opt) => {
-        opt.selected = opt.value === prevBranch;
-      });
       return;
     }
 
