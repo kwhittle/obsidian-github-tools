@@ -438,6 +438,13 @@
   margin-top: 4px;
 }
 
+.gwt-branch-sanitized-hint {
+  font-size: 11px;
+  color: var(--text-accent);
+  margin: 0;
+  font-family: var(--font-monospace);
+}
+
 /* ── Uncommitted files ───────────────────────────────────────────────────── */
 
 .gwt-files-details {

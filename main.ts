@@ -1246,6 +1246,27 @@ class CreatePRModal extends Modal {
 
 // ── New branch modal ─────────────────────────────────────────────────────────
 
+function sanitizeBranchName(raw: string): string {
+  let s = raw;
+  // Replace whitespace and common separators with dashes
+  s = s.replace(/[\s]+/g, "-");
+  // Remove characters git forbids: ~ ^ : ? * [ \ space DEL and control chars
+  s = s.replace(/[~^:?*\[\\\x00-\x1f\x7f]+/g, "");
+  // @{ is forbidden as a sequence
+  s = s.replace(/@\{/g, "");
+  // Lone @ as the whole name is forbidden — handled below
+  // Collapse consecutive dots and slashes
+  s = s.replace(/\.{2,}/g, ".");
+  s = s.replace(/\/{2,}/g, "/");
+  // No component may start with a dot
+  s = s.replace(/(^|\/)\.+/g, "$1");
+  // No component may end with .lock
+  s = s.replace(/\.lock($|\/)/g, "$1");
+  // Strip leading/trailing dashes, dots, slashes
+  s = s.replace(/^[-./]+/, "").replace(/[-./]+$/, "");
+  return s;
+}
+
 class NewBranchModal extends Modal {
   private currentBranch: string;
   private sourceBranch: string | null;
@@ -1297,18 +1318,32 @@ class NewBranchModal extends Modal {
     nameRow.createEl("label", { cls: "gwt-modal-label", text: "Branch name" });
     const input = nameRow.createEl("input", { cls: "gwt-modal-input", type: "text" });
     input.placeholder = "feature/my-branch";
+    const sanitizedHint = nameRow.createEl("p", { cls: "gwt-branch-sanitized-hint" });
+    sanitizedHint.style.display = "none";
+
+    const updateHint = () => {
+      const raw = input.value;
+      const sanitized = sanitizeBranchName(raw);
+      if (raw && sanitized !== raw) {
+        sanitizedHint.setText(`Will be created as: ${sanitized}`);
+        sanitizedHint.style.display = "";
+      } else {
+        sanitizedHint.style.display = "none";
+      }
+    };
+    input.addEventListener("input", updateHint);
 
     const btnRow = contentEl.createDiv("gwt-modal-btns");
     const createBtn = btnRow.createEl("button", { cls: "mod-cta", text: "Create branch" });
     const cancelBtn = btnRow.createEl("button", { text: "Cancel" });
 
     const submit = async () => {
-      const name = input.value.trim();
-      if (!name) { input.focus(); return; }
+      const sanitized = sanitizeBranchName(input.value.trim());
+      if (!sanitized) { input.focus(); return; }
       createBtn.disabled = true;
       createBtn.setText("Creating…");
       this.close();
-      await this.onSubmit(name, this.sourceBranch);
+      await this.onSubmit(sanitized, this.sourceBranch);
     };
 
     createBtn.addEventListener("click", () => { void submit(); });
