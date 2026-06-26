@@ -1,3 +1,7 @@
+.gwt-hidden {
+  display: none !important;
+}
+
 .gwt-sidebar {
   padding: 12px;
   font-size: 13px;

@@ -511,8 +511,7 @@ class GitHubRepoView extends ItemView {
     const chevron = btn.createSpan({ cls: "gwt-branch-btn-chevron" });
     setIcon(chevron, "chevron-down");
 
-    const dropdown = wrapper.createDiv("gwt-branch-dropdown");
-    dropdown.style.display = "none";
+    const dropdown = wrapper.createDiv("gwt-branch-dropdown gwt-hidden");
 
     const filterInput = dropdown.createEl("input", {
       cls: "gwt-branch-filter",
@@ -583,7 +582,7 @@ class GitHubRepoView extends ItemView {
 
     const openDropdown = () => {
       isOpen = true;
-      dropdown.style.display = "block";
+      dropdown.removeClass("gwt-hidden");
       btn.addClass("gwt-branch-btn-open");
       filterInput.value = "";
       renderList("");
@@ -592,23 +591,27 @@ class GitHubRepoView extends ItemView {
         if (!wrapper.contains(e.target as Node)) closeDropdown();
       };
       window.setTimeout(() => {
-        document.addEventListener("click", outsideClickHandler!, { capture: true });
+        activeDocument.addEventListener("click", outsideClickHandler!, { capture: true });
       }, 0);
     };
 
     const closeDropdown = () => {
       isOpen = false;
-      dropdown.style.display = "none";
+      dropdown.addClass("gwt-hidden");
       btn.removeClass("gwt-branch-btn-open");
       if (outsideClickHandler) {
-        document.removeEventListener("click", outsideClickHandler, { capture: true });
+        activeDocument.removeEventListener("click", outsideClickHandler, { capture: true });
         outsideClickHandler = null;
       }
     };
 
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      isOpen ? closeDropdown() : openDropdown();
+      if (isOpen) {
+        closeDropdown();
+      } else {
+        openDropdown();
+      }
     });
 
     filterInput.addEventListener("input", () => renderList(filterInput.value));
@@ -664,7 +667,7 @@ class GitHubRepoView extends ItemView {
       try {
         await runGitStashPop(repoPath);
         new Notice(`Switched to ${newBranch} and re-applied local changes.`);
-      } catch (e: unknown) {
+      } catch {
         new Notice(
           `Switched to ${newBranch}. Local changes are in the stash — resolve conflicts and run \`git stash pop\` manually.`,
           12000
@@ -888,7 +891,7 @@ class GitHubRepoView extends ItemView {
       try {
         await runGitStashPop(repoPath);
         new Notice("Pulled and re-applied local changes.");
-      } catch (e: unknown) {
+      } catch {
         new Notice(
           `Pulled successfully. Local changes are in the stash — resolve conflicts and run \`git stash pop\` manually.`,
           12000
@@ -1250,8 +1253,10 @@ function sanitizeBranchName(raw: string): string {
   let s = raw;
   // Replace whitespace and common separators with dashes
   s = s.replace(/[\s]+/g, "-");
-  // Remove characters git forbids: ~ ^ : ? * [ \ space DEL and control chars
-  s = s.replace(/[~^:?*\[\\\x00-\x1f\x7f]+/g, "");
+  // Remove characters git forbids: ~ ^ : ? * [ \
+  s = s.replace(/[~^:?*[\\]+/g, "");
+  // Remove DEL (0x7f) and ASCII control characters (0x00-0x1f)
+  s = s.split("").filter(c => { const code = c.charCodeAt(0); return code > 0x1f && code !== 0x7f; }).join("");
   // @{ is forbidden as a sequence
   s = s.replace(/@\{/g, "");
   // Lone @ as the whole name is forbidden — handled below
@@ -1318,17 +1323,16 @@ class NewBranchModal extends Modal {
     nameRow.createEl("label", { cls: "gwt-modal-label", text: "Branch name" });
     const input = nameRow.createEl("input", { cls: "gwt-modal-input", type: "text" });
     input.placeholder = "feature/my-branch";
-    const sanitizedHint = nameRow.createEl("p", { cls: "gwt-branch-sanitized-hint" });
-    sanitizedHint.style.display = "none";
+    const sanitizedHint = nameRow.createEl("p", { cls: "gwt-branch-sanitized-hint gwt-hidden" });
 
     const updateHint = () => {
       const raw = input.value;
       const sanitized = sanitizeBranchName(raw);
       if (raw && sanitized !== raw) {
         sanitizedHint.setText(`Will be created as: ${sanitized}`);
-        sanitizedHint.style.display = "";
+        sanitizedHint.removeClass("gwt-hidden");
       } else {
-        sanitizedHint.style.display = "none";
+        sanitizedHint.addClass("gwt-hidden");
       }
     };
     input.addEventListener("input", updateHint);
