@@ -512,6 +512,86 @@ details[open] .gwt-files-summary::before {
   white-space: nowrap;
 }
 
+/* ── Conflict banner ─────────────────────────────────────────────────────── */
+
+.gwt-conflict-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border-radius: 4px;
+  border-left: 3px solid var(--color-red);
+  background: var(--background-secondary);
+}
+
+.gwt-conflict-icon {
+  color: var(--color-red);
+  flex-shrink: 0;
+}
+
+.gwt-conflict-text {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-normal);
+}
+
+.gwt-conflict-resolve-btn {
+  flex-shrink: 0;
+}
+
+.gwt-conflict-list {
+  margin-bottom: 12px;
+}
+
+.gwt-conflict-row {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.gwt-conflict-row-path {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  word-break: break-word;
+  margin-bottom: 2px;
+}
+
+/* ── Stash ────────────────────────────────────────────────────────────────── */
+
+.gwt-stash-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.gwt-stash-list {
+  margin-bottom: 12px;
+}
+
+.gwt-stash-entry {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.gwt-stash-entry-header {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.gwt-stash-entry-msg {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.gwt-stash-entry-stat {
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  white-space: pre-wrap;
+  margin-bottom: 6px;
+}
+
 /* ── Behind / pull ───────────────────────────────────────────────────────── */
 
 .gwt-behind-row {

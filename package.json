@@ -1,6 +1,6 @@
 {
   "name": "obsidian-github-tools",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "GitHub wiki repo monitor for Obsidian",
   "main": "main.js",
   "scripts": {

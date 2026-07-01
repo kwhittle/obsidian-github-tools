@@ -62,6 +62,21 @@ interface ChangedFile {
   path: string;
 }
 
+interface ConflictFile {
+  status: string;
+  path: string;
+  oursDeleted: boolean;
+  theirsDeleted: boolean;
+}
+
+type MergeState = "merge" | "cherry-pick" | null;
+
+interface StashEntry {
+  index: number;
+  branch: string;
+  message: string;
+}
+
 interface GitStatus {
   branch: string;
   localBranches: string[];
@@ -71,6 +86,9 @@ interface GitStatus {
   commitsBehind: number;
   comparingTo: string;
   incomingFiles: string[];
+  conflicts: ConflictFile[];
+  mergeState: MergeState;
+  stashes: StashEntry[];
 }
 
 // ── GitHub API types ─────────────────────────────────────────────────────────
@@ -136,6 +154,49 @@ function parseChangedFiles(porcelain: string): ChangedFile[] {
     }));
 }
 
+const UNMERGED_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
+
+function extractConflicts(changedFiles: ChangedFile[]): ConflictFile[] {
+  return changedFiles
+    .filter((f) => UNMERGED_CODES.has(f.status))
+    .map((f) => ({
+      status: f.status,
+      path: f.path,
+      oursDeleted: f.status === "DD" || f.status === "DU",
+      theirsDeleted: f.status === "DD" || f.status === "UD",
+    }));
+}
+
+async function detectMergeState(repoPath: string): Promise<MergeState> {
+  try {
+    await gitExec(repoPath, "rev-parse -q --verify MERGE_HEAD");
+    return "merge";
+  } catch { /* not merging */ }
+  try {
+    await gitExec(repoPath, "rev-parse -q --verify CHERRY_PICK_HEAD");
+    return "cherry-pick";
+  } catch { /* not cherry-picking */ }
+  return null;
+}
+
+async function getStashes(repoPath: string): Promise<StashEntry[]> {
+  let raw: string;
+  try {
+    raw = await gitExec(repoPath, "stash list");
+  } catch {
+    return [];
+  }
+  if (!raw) return [];
+  return raw.split("\n").map((line, i) => {
+    const m = line.match(/^stash@\{(\d+)\}:\s*(?:On|WIP on)\s+([^:]+):\s*(.*)$/);
+    return {
+      index: m ? parseInt(m[1], 10) : i,
+      branch: m ? m[2].trim() : "",
+      message: m ? m[3].trim() : line,
+    };
+  });
+}
+
 function parseGitHubRemote(url: string): { owner: string; repo: string } | null {
   const ssh = url.match(/git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/);
   if (ssh) return { owner: ssh[1], repo: ssh[2] };
@@ -185,6 +246,11 @@ async function fetchGitStatus(repoPath: string, trackBranch: string): Promise<Gi
     incomingFiles = incomingRaw.split("\n").map((f) => f.trim()).filter(Boolean);
   } catch { /* non-fatal */ }
 
+  const [mergeState, stashes] = await Promise.all([
+    detectMergeState(repoPath),
+    getStashes(repoPath),
+  ]);
+
   return {
     branch,
     localBranches,
@@ -194,6 +260,9 @@ async function fetchGitStatus(repoPath: string, trackBranch: string): Promise<Gi
     commitsBehind,
     comparingTo,
     incomingFiles,
+    conflicts: extractConflicts(changedFiles),
+    mergeState,
+    stashes,
   };
 }
 
@@ -212,6 +281,108 @@ async function runGitStashPop(repoPath: string): Promise<void> {
 
 async function runGitCheckout(repoPath: string, branch: string): Promise<void> {
   await gitExec(repoPath, `checkout "${branch}"`);
+}
+
+async function getConflictFiles(repoPath: string): Promise<ConflictFile[]> {
+  const porcelain = await gitExec(repoPath, "status --porcelain");
+  return extractConflicts(parseChangedFiles(porcelain));
+}
+
+async function resolveConflictFile(repoPath: string, conflict: ConflictFile, keep: "ours" | "theirs"): Promise<void> {
+  const quoted = `'${conflict.path.replace(/'/g, "'\\''")}'`;
+  const deleted = keep === "ours" ? conflict.oursDeleted : conflict.theirsDeleted;
+  if (deleted) {
+    await gitExec(repoPath, `rm -f -- ${quoted}`);
+  } else {
+    await gitExec(repoPath, `checkout --${keep} -- ${quoted}`);
+    await gitExec(repoPath, `add -- ${quoted}`);
+  }
+}
+
+async function abortMergeState(repoPath: string, state: "merge" | "cherry-pick"): Promise<void> {
+  await gitExec(repoPath, state === "merge" ? "merge --abort" : "cherry-pick --abort");
+}
+
+async function applyStash(repoPath: string, index: number): Promise<void> {
+  await gitExec(repoPath, `stash apply stash@{${index}}`);
+}
+
+async function dropStash(repoPath: string, index: number): Promise<void> {
+  await gitExec(repoPath, `stash drop stash@{${index}}`);
+}
+
+async function getStashStat(repoPath: string, index: number): Promise<string> {
+  return gitExec(repoPath, `stash show stash@{${index}} --stat`);
+}
+
+function isBlockedByLocalChanges(message: string): boolean {
+  return /would be overwritten by (checkout|merge)|Please commit your changes or stash them|Please move or remove them/i.test(
+    message
+  );
+}
+
+// Runs a git operation (checkout/pull) directly first — git carries forward local changes that
+// don't conflict with the target, at no risk. Only falls back to stash if the operation is
+// actually blocked by local changes. Bails immediately, without touching the stash, if the repo
+// already has an unresolved conflict, since `git stash` refuses to run against a broken index.
+async function runWithStashFallback(
+  repoPath: string,
+  op: () => Promise<void>,
+  successMessage: (stashed: boolean) => string,
+  failurePrefix: string
+): Promise<boolean> {
+  const conflicts = await getConflictFiles(repoPath);
+  if (conflicts.length > 0) {
+    const rest = conflicts.length > 1 ? ` (+${conflicts.length - 1} more)` : "";
+    new Notice(
+      `${failurePrefix}: unresolved conflict in ${conflicts[0].path}${rest} — resolve it in the sidebar first.`,
+      10000
+    );
+    return false;
+  }
+
+  try {
+    await op();
+    new Notice(successMessage(false));
+    return true;
+  } catch (e: unknown) {
+    if (!isBlockedByLocalChanges(errorMessage(e))) {
+      new Notice(`${failurePrefix}: ${errorMessage(e)}`, 8000);
+      return false;
+    }
+  }
+
+  let stashed: boolean;
+  try {
+    stashed = await runGitStash(repoPath);
+  } catch (e: unknown) {
+    new Notice(`${failurePrefix}: failed to stash local changes — ${errorMessage(e)}`, 8000);
+    return false;
+  }
+  if (!stashed) {
+    new Notice(`${failurePrefix}: local changes are blocking this.`, 8000);
+    return false;
+  }
+
+  try {
+    await op();
+  } catch (e: unknown) {
+    try { await runGitStashPop(repoPath); } catch { /* best-effort */ }
+    new Notice(`${failurePrefix}: ${errorMessage(e)}`, 8000);
+    return false;
+  }
+
+  try {
+    await runGitStashPop(repoPath);
+    new Notice(successMessage(true));
+  } catch {
+    new Notice(
+      `${successMessage(true)} Re-applying local changes conflicted — they're safe in the stash; ` +
+        "resolve conflicts and run `git stash pop` manually.",
+      12000
+    );
+  }
+  return true;
 }
 
 async function runGitCreateBranch(repoPath: string, name: string, from: string | null): Promise<void> {
@@ -426,11 +597,18 @@ class GitHubRepoView extends ItemView {
       return;
     }
 
-    const { branch, localBranches, remoteBranches, hasUncommittedChanges, changedFiles, commitsBehind, comparingTo } =
-      this.gitStatus;
+    const {
+      branch, localBranches, remoteBranches, hasUncommittedChanges, changedFiles,
+      commitsBehind, comparingTo, conflicts, mergeState, stashes,
+    } = this.gitStatus;
+    const repoPath = this.plugin.settings.repoPath;
 
     const section = root.createDiv("gwt-section");
     section.createEl("h5", { text: "Local Repo" });
+
+    if (conflicts.length > 0 || mergeState) {
+      this.renderConflictBanner(section, repoPath, conflicts, mergeState);
+    }
 
     const actionBar = section.createDiv("gwt-action-bar");
     const actions: Array<{ icon: string; label: string; handler: () => void }> = [
@@ -493,6 +671,44 @@ class GitHubRepoView extends ItemView {
     } else {
       section.createDiv("gwt-row gwt-ok").setText(`✓ Up to date with origin/${comparingTo}`);
     }
+
+    if (stashes.length > 0) {
+      const stashRow = section.createDiv("gwt-stash-row");
+      stashRow.createSpan({
+        cls: "gwt-muted",
+        text: `${stashes.length} stash${stashes.length !== 1 ? "es" : ""} in this repo`,
+      });
+      const viewBtn = stashRow.createEl("button", { cls: "gwt-btn gwt-btn-sm", text: "View…" });
+      viewBtn.addEventListener("click", () => {
+        new StashModal(this.app, repoPath, stashes, async () => { await this.refresh(); }).open();
+      });
+    }
+  }
+
+  private renderConflictBanner(
+    container: HTMLElement,
+    repoPath: string,
+    conflicts: ConflictFile[],
+    mergeState: MergeState
+  ): void {
+    const banner = container.createDiv("gwt-conflict-banner");
+    banner.createSpan({ cls: "gwt-conflict-icon", text: "⚠" });
+    const textEl = banner.createDiv("gwt-conflict-text");
+    if (mergeState) {
+      textEl.setText(
+        `${mergeState === "merge" ? "Merge" : "Cherry-pick"} in progress with ${conflicts.length} unresolved ` +
+          `conflict${conflicts.length !== 1 ? "s" : ""}.`
+      );
+    } else {
+      textEl.setText(
+        `${conflicts.length} unresolved conflict${conflicts.length !== 1 ? "s" : ""} — ` +
+          "branch switches and pulls will fail until this is resolved."
+      );
+    }
+    const btn = banner.createEl("button", { cls: "gwt-btn gwt-btn-sm gwt-conflict-resolve-btn", text: "Resolve…" });
+    btn.addEventListener("click", () => {
+      new ConflictModal(this.app, repoPath, conflicts, mergeState, async () => { await this.refresh(); }).open();
+    });
   }
 
   private renderBranchPicker(
@@ -645,39 +861,19 @@ class GitHubRepoView extends ItemView {
     if (newBranch === prevBranch) return;
     const { repoPath } = this.plugin.settings;
 
-    const stashed = this.gitStatus?.hasUncommittedChanges
-      ? await runGitStash(repoPath)
-      : false;
-
-    try {
-      if (isRemote) {
-        await gitExec(repoPath, `checkout --track "origin/${newBranch}"`);
-      } else {
-        await runGitCheckout(repoPath, newBranch);
-      }
-    } catch (e: unknown) {
-      if (stashed) {
-        try { await runGitStashPop(repoPath); } catch { /* best-effort */ }
-      }
-      new Notice(`Could not switch branch: ${errorMessage(e)}`, 8000);
-      return;
-    }
-
-    if (stashed) {
-      try {
-        await runGitStashPop(repoPath);
-        new Notice(`Switched to ${newBranch} and re-applied local changes.`);
-      } catch {
-        new Notice(
-          `Switched to ${newBranch}. Local changes are in the stash — resolve conflicts and run \`git stash pop\` manually.`,
-          12000
-        );
-      }
-    } else {
-      new Notice(`Switched to branch: ${newBranch}`);
-    }
-
-    await this.refresh();
+    const ok = await runWithStashFallback(
+      repoPath,
+      async () => {
+        if (isRemote) {
+          await gitExec(repoPath, `checkout --track "origin/${newBranch}"`);
+        } else {
+          await runGitCheckout(repoPath, newBranch);
+        }
+      },
+      (stashed) => (stashed ? `Switched to ${newBranch} and re-applied local changes.` : `Switched to branch: ${newBranch}`),
+      "Could not switch branch"
+    );
+    if (ok) await this.refresh();
   }
 
   private async handleCreateBranch(name: string, from: string | null): Promise<void> {
@@ -873,35 +1069,13 @@ class GitHubRepoView extends ItemView {
     if (!this.gitStatus) return;
     const { repoPath } = this.plugin.settings;
 
-    const stashed = this.gitStatus.hasUncommittedChanges
-      ? await runGitStash(repoPath)
-      : false;
-
-    try {
-      await runGitPull(repoPath);
-    } catch (e: unknown) {
-      if (stashed) {
-        try { await runGitStashPop(repoPath); } catch { /* best-effort */ }
-      }
-      new Notice(`Pull failed: ${errorMessage(e)}`, 8000);
-      return;
-    }
-
-    if (stashed) {
-      try {
-        await runGitStashPop(repoPath);
-        new Notice("Pulled and re-applied local changes.");
-      } catch {
-        new Notice(
-          `Pulled successfully. Local changes are in the stash — resolve conflicts and run \`git stash pop\` manually.`,
-          12000
-        );
-      }
-    } else {
-      new Notice("Pull successful.");
-    }
-
-    await this.refresh();
+    const ok = await runWithStashFallback(
+      repoPath,
+      () => runGitPull(repoPath),
+      (stashed) => (stashed ? "Pulled and re-applied local changes." : "Pull successful."),
+      "Pull failed"
+    );
+    if (ok) await this.refresh();
   }
 }
 
@@ -1088,6 +1262,182 @@ export default class GitHubWikiPlugin extends Plugin {
     this.settings.seenPRActivity[pr.number] = pr.updatedAt;
     void this.saveSettings();
   }
+}
+
+// ── Conflict resolution modal ─────────────────────────────────────────────────
+
+class ConflictModal extends Modal {
+  private conflicts: ConflictFile[];
+
+  constructor(
+    app: App,
+    private repoPath: string,
+    conflicts: ConflictFile[],
+    private mergeState: MergeState,
+    private onResolved: () => Promise<void>
+  ) {
+    super(app);
+    this.conflicts = conflicts;
+  }
+
+  onOpen(): void {
+    this.render();
+  }
+
+  private render(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("gwt-modal");
+    contentEl.createEl("h3", { text: "Resolve conflicts" });
+
+    if (this.mergeState) {
+      const abortRow = contentEl.createDiv("gwt-modal-hint");
+      abortRow.setText(
+        `A ${this.mergeState} is in progress. Aborting returns the repo to how it was before the ${this.mergeState} started.`
+      );
+      const abortBtn = contentEl.createEl("button", {
+        cls: "mod-warning",
+        text: `Abort ${this.mergeState}`,
+      });
+      abortBtn.addEventListener("click", () => { void this.abort(); });
+    }
+
+    const list = contentEl.createDiv("gwt-conflict-list");
+    if (this.conflicts.length === 0) {
+      list.createDiv("gwt-muted").setText("No unresolved file conflicts.");
+    }
+    for (const c of this.conflicts) {
+      const row = list.createDiv("gwt-conflict-row");
+      row.createDiv({ cls: "gwt-conflict-row-path", text: c.path });
+      row.createDiv({ cls: "gwt-muted", text: `status: ${c.status}` });
+
+      const btnRow = row.createDiv("gwt-modal-btns");
+      const mineBtn = btnRow.createEl("button", {
+        cls: "gwt-btn gwt-btn-sm",
+        text: c.oursDeleted ? "Keep deleted (mine)" : "Keep mine",
+      });
+      mineBtn.addEventListener("click", () => { void this.resolve(c, "ours"); });
+
+      const theirsBtn = btnRow.createEl("button", {
+        cls: "gwt-btn gwt-btn-sm",
+        text: c.theirsDeleted ? "Keep deleted (theirs)" : "Keep theirs",
+      });
+      theirsBtn.addEventListener("click", () => { void this.resolve(c, "theirs"); });
+    }
+
+    const closeBtn = contentEl.createEl("button", { text: "Done" });
+    closeBtn.addEventListener("click", () => this.close());
+  }
+
+  private async resolve(c: ConflictFile, keep: "ours" | "theirs"): Promise<void> {
+    try {
+      await resolveConflictFile(this.repoPath, c, keep);
+      new Notice(`Resolved ${c.path} (kept ${keep}).`);
+      this.conflicts = this.conflicts.filter((x) => x.path !== c.path);
+      await this.onResolved();
+      if (this.conflicts.length === 0 && !this.mergeState) {
+        this.close();
+      } else {
+        this.render();
+      }
+    } catch (e: unknown) {
+      new Notice(`Failed to resolve ${c.path}: ${errorMessage(e)}`, 8000);
+    }
+  }
+
+  private async abort(): Promise<void> {
+    if (!this.mergeState) return;
+    try {
+      await abortMergeState(this.repoPath, this.mergeState);
+      new Notice(`${this.mergeState} aborted.`);
+      this.close();
+      await this.onResolved();
+    } catch (e: unknown) {
+      new Notice(`Failed to abort ${this.mergeState}: ${errorMessage(e)}`, 8000);
+    }
+  }
+
+  onClose(): void { this.contentEl.empty(); }
+}
+
+// ── Stash modal ───────────────────────────────────────────────────────────────
+
+class StashModal extends Modal {
+  constructor(
+    app: App,
+    private repoPath: string,
+    private stashes: StashEntry[],
+    private onChanged: () => Promise<void>
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.render();
+  }
+
+  private render(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("gwt-modal");
+    contentEl.createEl("h3", { text: "Stashes in this repo" });
+
+    if (this.stashes.length === 0) {
+      contentEl.createDiv("gwt-muted").setText("No stashes.");
+      return;
+    }
+
+    const list = contentEl.createDiv("gwt-stash-list");
+    for (const s of this.stashes) {
+      const row = list.createDiv("gwt-stash-entry");
+      row.createDiv({ cls: "gwt-stash-entry-header", text: `stash@{${s.index}} — on ${s.branch}` });
+      row.createDiv({ cls: "gwt-stash-entry-msg", text: s.message });
+
+      const statEl = row.createDiv({ cls: "gwt-muted gwt-stash-entry-stat", text: "Loading…" });
+      void this.loadStat(statEl, s);
+
+      const btnRow = row.createDiv("gwt-modal-btns");
+      const applyBtn = btnRow.createEl("button", { cls: "gwt-btn gwt-btn-sm", text: "Apply" });
+      applyBtn.addEventListener("click", () => { void this.apply(s); });
+      const dropBtn = btnRow.createEl("button", { cls: "gwt-btn gwt-btn-sm mod-warning", text: "Drop" });
+      dropBtn.addEventListener("click", () => { void this.drop(s); });
+    }
+  }
+
+  private async loadStat(statEl: HTMLElement, s: StashEntry): Promise<void> {
+    try {
+      const stat = await getStashStat(this.repoPath, s.index);
+      statEl.setText(stat || "(no file changes)");
+    } catch {
+      statEl.setText("(unable to load diff)");
+    }
+  }
+
+  private async apply(s: StashEntry): Promise<void> {
+    try {
+      await applyStash(this.repoPath, s.index);
+      new Notice(`Applied stash@{${s.index}}. Check the sidebar for any conflicts it introduced.`);
+      this.close();
+      await this.onChanged();
+    } catch (e: unknown) {
+      new Notice(`Failed to apply stash@{${s.index}}: ${errorMessage(e)}`, 8000);
+    }
+  }
+
+  private async drop(s: StashEntry): Promise<void> {
+    const confirmed = activeWindow.confirm(`Drop stash@{${s.index}} ("${s.message}")? This cannot be easily undone.`);
+    if (!confirmed) return;
+    try {
+      await dropStash(this.repoPath, s.index);
+      new Notice(`Dropped stash@{${s.index}}.`);
+      this.close();
+      await this.onChanged();
+    } catch (e: unknown) {
+      new Notice(`Failed to drop stash@{${s.index}}: ${errorMessage(e)}`, 8000);
+    }
+  }
+
+  onClose(): void { this.contentEl.empty(); }
 }
 
 // ── Commit modal ─────────────────────────────────────────────────────────────

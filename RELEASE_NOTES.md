@@ -1,0 +1,3 @@
+- Branch switching and pulling now try the operation directly first, only falling back to auto-stash when local changes actually block it — fixes switches silently failing after a pull.
+- Sidebar now flags unresolved git conflicts or an in-progress merge/cherry-pick, with one-click resolution (keep mine/theirs) or abort.
+- New: view and manage stashes for the current repo (apply or drop) directly from the sidebar.
